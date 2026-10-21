@@ -87,6 +87,40 @@ async function downloadZip(targets:Entry[],name:string){if(!targets.length)retur
  for(const entry of targets){if(entry.size!==null&&entry.size>MAX_SINGLE)throw Error("A selected file exceeds the 250 MB limit.");const bytes=await entry.file.async("uint8array");total+=bytes.byteLength;if(total>MAX_TOTAL)throw Error("Selected files exceed the 750 MB limit.");zip.file(entry.path,new Uint8Array(bytes))}
  save(await zip.generateAsync({type:"blob",compression:"DEFLATE",compressionOptions:{level:3}}),name);
 }catch(e){setError(e instanceof Error?e.message:"Unable to create ZIP.")}finally{setBusy(false)}}
+async function extractAllNested(){
+ setBusy(true);setError("");
+ try{
+  const output=new JSZip();
+  let bytesTotal=0,filesTotal=0;
+  async function walk(items:Entry[],prefix:string,depth:number):Promise<void>{
+   if(depth>MAX_DEPTH)throw Error("Nested ZIP depth exceeds the 6-level limit.");
+   for(const item of items){
+    const target=prefix+item.path;
+    if(item.dir){output.folder(target);continue}
+    if(item.size!==null&&item.size>MAX_SINGLE)throw Error("File exceeds 250 MB: "+target);
+    const data=await item.file.async("uint8array");
+    if(data.byteLength>MAX_SINGLE)throw Error("File exceeds 250 MB: "+target);
+    if(isArchive(item.path)){
+     if(depth>=MAX_DEPTH)throw Error("Nested ZIP depth exceeds the 6-level limit: "+target);
+     let nested:JSZip;
+     try{nested=await JSZip.loadAsync(data)}catch{throw Error("Cannot open nested archive: "+target+". It may be damaged or not ZIP-format data.")}
+     const inner=mapArchive(nested);
+     const base=target.replace(/\.(zip|sip)$/i,"");
+     await walk(inner,base+"/",depth+1);
+    }else{
+     bytesTotal+=data.byteLength;filesTotal++;
+     if(bytesTotal>MAX_TOTAL)throw Error("Extracted content exceeds the 750 MB limit.");
+     if(filesTotal>MAX_FILES)throw Error("Extracted content exceeds the 10,000-file limit.");
+     output.file(target,new Uint8Array(data));
+    }
+   }
+  }
+  await walk(entries,"",0);
+  if(filesTotal===0)throw Error("No files were found to extract.");
+  const result=await output.generateAsync({type:"blob",compression:"DEFLATE",compressionOptions:{level:3}});
+  save(result,archive.replace(/\.(zip|sip)$/i,"")+"-fully-extracted.zip");
+ }catch(e){setError(e instanceof Error?e.message:"Recursive extraction failed.")}finally{setBusy(false)}
+}
 async function openPreview(entry:Entry){setBusy(true);setError("");setPreview(null);try{
  const type=kind(entry.path);
  if(!["pdf","image","text"].includes(type))throw Error("Preview is not available for this file type.");
@@ -115,6 +149,7 @@ return <main style={{maxWidth:1020,margin:"auto",padding:"30px 20px",color:"#e5e
 <span style={{fontSize:12,color:"#94a3b8"}}>{entry.dir?"Folder":format(entry.size)}</span>
 {entry.dir?<button disabled={busy} style={buttonStyle} onClick={()=>void downloadZip(files.filter(x=>x.path.startsWith(entry.path)),filename(entry.path)+".zip")}>Download folder</button>:<>{isArchive(entry.path)&&<button disabled={busy} style={{...buttonStyle,background:"#0f766e"}} onClick={()=>void openNested(entry)}>Open archive ↗</button>}<button disabled={busy||kind(entry.path)==="other"} style={{...buttonStyle,background:"#334155"}} onClick={()=>void openPreview(entry)}>Preview</button><button disabled={busy} style={buttonStyle} onClick={()=>void downloadFile(entry)}>Download</button></>}
 </div>)}
+<div style={{marginTop:20,padding:16,border:"1px solid #475569",borderRadius:12,display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,flexWrap:"wrap"}}><div><strong>Extract everything (including nested ZIPs)</strong><p style={{margin:"6px 0 0",fontSize:13,color:"#94a3b8"}}>Recursively opens nested ZIPs, replaces them with folders, and downloads one ZIP of the extracted files.</p></div><button disabled={busy||!files.length} style={{...buttonStyle,background:"#0f766e"}} onClick={()=>void extractAllNested()}>Extract all nested ZIPs ↓</button></div>
 <div style={{display:"flex",justifyContent:"space-between",gap:12,flexWrap:"wrap",alignItems:"center",marginTop:20}}><div><span>{selected.length} selected</span> <button style={{...buttonStyle,background:"#334155",marginLeft:8}} onClick={()=>setSelected(files.map(x=>x.path))}>Select all</button> <button style={{...buttonStyle,background:"#334155"}} onClick={()=>setSelected([])}>Clear</button></div><button disabled={busy||!selected.length} style={buttonStyle} onClick={()=>void downloadZip(files.filter(x=>selection.has(x.path)),archive.replace(/\.zip$/i,"")+"-selected.zip")}>Download selected ZIP ↓</button></div>
 </section>}
 {preview&&<div role="dialog" aria-label={"Preview "+preview.path} style={{position:"fixed",inset:0,zIndex:20,background:"rgba(0,0,0,.83)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}><section style={{background:"#141d30",width:"min(900px,100%)",maxHeight:"90vh",borderRadius:14,padding:18,display:"flex",flexDirection:"column",gap:12}}><div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:12}}><strong style={{overflowWrap:"anywhere"}}>{preview.path}</strong><button autoFocus onClick={()=>setPreview(null)} style={buttonStyle}>Close ✕</button></div>{preview.type==="text"?<pre style={{whiteSpace:"pre-wrap",overflow:"auto",background:"#0b1220",padding:15,maxHeight:"70vh",fontSize:13}}>{preview.text}</pre>:preview.type==="image"?<img alt={"Preview of "+preview.path} src={preview.url} style={{maxWidth:"100%",maxHeight:"72vh",objectFit:"contain",alignSelf:"center"}}/>:<iframe title={"PDF preview "+preview.path} src={preview.url} sandbox="" style={{width:"100%",height:"70vh",border:0,background:"white"}}/>}</section></div>}
