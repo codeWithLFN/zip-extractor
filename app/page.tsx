@@ -4,6 +4,9 @@ import JSZip from "jszip";
 
 type Entry={path:string;dir:boolean;file:JSZip.JSZipObject;size:number|null};
 type Kind="all"|"pdf"|"image"|"text"|"other";
+type ArchiveFrame={entries:Entry[];archive:string;folder:string;query:string;filter:Kind;selected:string[]};
+const MAX_DEPTH=6;
+function isArchive(path:string){return /\.(zip|sip)$/i.test(path)}
 const MAX_ZIP=300*1024*1024;
 const MAX_FILES=10000;
 const MAX_PREVIEW=8*1024*1024;
@@ -17,6 +20,7 @@ function filename(path:string){return path.replace(/\/$/,"").split("/").pop()||p
 const buttonStyle={background:"#6366f1",color:"white",border:0,borderRadius:10,padding:"10px 14px",cursor:"pointer"} as const;
 export default function Home(){
 const [entries,setEntries]=useState<Entry[]>([]);
+const [history,setHistory]=useState<ArchiveFrame[]>([]);
 const [archive,setArchive]=useState("");
 const [folder,setFolder]=useState("");
 const [query,setQuery]=useState("");
@@ -43,14 +47,37 @@ async function load(file?:File){if(!file)return;setBusy(true);setError("");setPr
  if(!file.name.toLowerCase().endsWith(".zip"))throw Error("Choose a .zip archive.");
  if(file.size>MAX_ZIP)throw Error("Archive exceeds the 300 MB upload limit.");
  const zip=await JSZip.loadAsync(file);
+ const mapped=mapArchive(zip);
+ setHistory([]);setEntries(mapped);setArchive(file.name);setFolder("");setQuery("");setFilter("all");setSelected(mapped.filter(x=>!x.dir).map(x=>x.path));
+}catch(e){setError(e instanceof Error?e.message:"Unable to open archive.");}finally{setBusy(false)}}
+function mapArchive(zip:JSZip):Entry[]{
  const list=Object.values(zip.files);
  if(list.length>MAX_FILES)throw Error("Archive contains too many entries.");
  const safe=list.filter(x=>!x.name.startsWith("/")&&!x.name.split("/").includes("..")&&!/^[a-zA-Z]:/.test(x.name)&&!x.name.includes("\\"));
  const mapped=safe.map(x=>({path:x.name,dir:x.dir,file:x,size:x.dir?null:getSize(x)}));
  const known=mapped.reduce((sum,x)=>sum+(x.size||0),0);
  if(known>MAX_TOTAL)throw Error("Uncompressed archive is too large for browser processing.");
- setEntries(mapped);setArchive(file.name);setFolder("");setQuery("");setFilter("all");setSelected(mapped.filter(x=>!x.dir).map(x=>x.path));
-}catch(e){setError(e instanceof Error?e.message:"Unable to open archive.");}finally{setBusy(false)}}
+ return mapped;
+}
+async function openNested(entry:Entry){
+ if(!isArchive(entry.path))return;
+ setBusy(true);setError("");setPreview(null);
+ try{
+  if(history.length>=MAX_DEPTH)throw Error("Maximum nested archive depth reached (6).");
+  if(entry.size!==null&&entry.size>MAX_SINGLE)throw Error("Nested archive exceeds the 250 MB limit.");
+  const bytes=await entry.file.async("uint8array");
+  if(bytes.byteLength>MAX_SINGLE)throw Error("Nested archive is too large.");
+  const zip=await JSZip.loadAsync(bytes);
+  const mapped=mapArchive(zip);
+  setHistory(old=>[...old,{entries,archive,folder,query,filter,selected}]);
+  setEntries(mapped);setArchive(filename(entry.path));setFolder("");setQuery("");setFilter("all");
+  setSelected(mapped.filter(x=>!x.dir).map(x=>x.path));
+ }catch(e){setError(e instanceof Error?"Unable to open nested archive: "+e.message:"Unable to open nested archive.")}finally{setBusy(false)}
+}
+function backToParent(){
+ const parent=history[history.length-1];if(!parent)return;
+ setHistory(old=>old.slice(0,-1));setEntries(parent.entries);setArchive(parent.archive);setFolder(parent.folder);setQuery(parent.query);setFilter(parent.filter);setSelected(parent.selected);setPreview(null);setError("");
+}
 function toggle(entry:Entry){const paths=entry.dir?files.filter(x=>x.path.startsWith(entry.path)).map(x=>x.path):[entry.path];const all=paths.every(x=>selection.has(x));setSelected(old=>all?old.filter(x=>!paths.includes(x)):[...new Set([...old,...paths])])}
 async function downloadFile(entry:Entry){setBusy(true);setError("");try{if(entry.size!==null&&entry.size>MAX_SINGLE)throw Error("This file exceeds the 250 MB extraction limit.");const data=await entry.file.async("uint8array");if(data.byteLength>MAX_SINGLE)throw Error("File is too large.");save(new Blob([new Uint8Array(data)]),filename(entry.path))}catch(e){setError(e instanceof Error?e.message:"Unable to download file.")}finally{setBusy(false)}}
 async function downloadZip(targets:Entry[],name:string){if(!targets.length)return;setBusy(true);setError("");try{
@@ -78,7 +105,7 @@ return <main style={{maxWidth:1020,margin:"auto",padding:"30px 20px",color:"#e5e
 <label onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();void load(e.dataTransfer.files[0])}} style={{display:"block",textAlign:"center",padding:"30px 15px",border:"2px dashed #6366f1",borderRadius:16,background:"#141d30",cursor:"pointer"}}><div style={{fontSize:32}}>⇧</div><h2>Drop a ZIP file here</h2><p style={{color:"#94a3b8"}}>Or click to choose an archive · Max 300 MB</p><span style={buttonStyle}>Choose ZIP file</span><input type="file" accept=".zip,application/zip" style={{display:"none"}} onChange={e=>{void load(e.target.files?.[0]);e.target.value=""}}/></label>
 {error&&<p role="alert" style={{color:"#fda4af",padding:"10px 0"}}>{error}</p>}{busy&&<p role="status" style={{color:"#a5b4fc"}}>Processing, please wait…</p>}
 {archive&&<section style={{background:"#141d30",borderRadius:16,padding:20,marginTop:25}}>
-<h2 style={{overflowWrap:"anywhere"}}>📦 {archive}</h2><p style={{color:"#94a3b8"}}>{files.length} files · {entries.filter(x=>x.dir).length} folders · {format(files.every(x=>x.size!==null)?files.reduce((sum,x)=>sum+(x.size||0),0):null)} uncompressed</p>
+<h2 style={{overflowWrap:"anywhere"}}>📦 {archive}</h2>{history.length>0&&<div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:12}}><button disabled={busy} style={buttonStyle} onClick={backToParent}>← Parent ZIP</button><span style={{color:"#94a3b8",overflowWrap:"anywhere"}}>{history.map(x=>x.archive).join(" › ")} › {archive}</span></div>}<p style={{color:"#94a3b8"}}>{files.length} files · {entries.filter(x=>x.dir).length} folders · {format(files.every(x=>x.size!==null)?files.reduce((sum,x)=>sum+(x.size||0),0):null)} uncompressed</p>
 <div style={{display:"flex",gap:10,flexWrap:"wrap",margin:"18px 0"}}><input aria-label="Search files" placeholder="Search files and folders…" value={query} onChange={e=>setQuery(e.target.value)} style={{flex:"1 1 220px",padding:12,borderRadius:9,border:"1px solid #475569",background:"#0b1220",color:"white"}}/><select aria-label="Filter file type" value={filter} onChange={e=>setFilter(e.target.value as Kind)} style={{padding:12,borderRadius:9,border:"1px solid #475569",background:"#0b1220",color:"white"}}><option value="all">All file types</option><option value="pdf">PDFs</option><option value="image">Images</option><option value="text">Text and code</option><option value="other">Other files</option></select></div>
 <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}><button disabled={busy} onClick={()=>{setFolder("");setQuery("");setFilter("all")}} style={buttonStyle}>Root</button>{!active&&folder&&<button disabled={busy} style={buttonStyle} onClick={()=>{const parts=folder.replace(/\/$/,"").split("/");parts.pop();setFolder(parts.length?parts.join("/")+"/":"")}}>← Back</button>}<span style={{color:"#94a3b8",overflowWrap:"anywhere"}}>{active?"Search results":folder||"All files"}</span></div>
 {visible.length===0&&<p style={{color:"#94a3b8"}}>No matching files.</p>}
@@ -86,7 +113,7 @@ return <main style={{maxWidth:1020,margin:"auto",padding:"30px 20px",color:"#e5e
 <input aria-label={"Select "+entry.path} type="checkbox" checked={entry.dir?files.filter(x=>x.path.startsWith(entry.path)).every(x=>selection.has(x.path)):selection.has(entry.path)} onChange={()=>toggle(entry)}/>
 <button style={{flex:"1 1 160px",minWidth:0,textAlign:"left",background:"none",border:0,color:"#e5e7eb",cursor:"pointer",overflowWrap:"anywhere"}} onClick={()=>entry.dir?(setFolder(entry.path),setQuery(""),setFilter("all")):void openPreview(entry)}>{entry.dir?"📁":"📄"} {active?entry.path:entry.path.slice(folder.length).replace(/\/$/,"")}</button>
 <span style={{fontSize:12,color:"#94a3b8"}}>{entry.dir?"Folder":format(entry.size)}</span>
-{entry.dir?<button disabled={busy} style={buttonStyle} onClick={()=>void downloadZip(files.filter(x=>x.path.startsWith(entry.path)),filename(entry.path)+".zip")}>Download folder</button>:<><button disabled={busy||kind(entry.path)==="other"} style={{...buttonStyle,background:"#334155"}} onClick={()=>void openPreview(entry)}>Preview</button><button disabled={busy} style={buttonStyle} onClick={()=>void downloadFile(entry)}>Download</button></>}
+{entry.dir?<button disabled={busy} style={buttonStyle} onClick={()=>void downloadZip(files.filter(x=>x.path.startsWith(entry.path)),filename(entry.path)+".zip")}>Download folder</button>:<>{isArchive(entry.path)&&<button disabled={busy} style={{...buttonStyle,background:"#0f766e"}} onClick={()=>void openNested(entry)}>Open archive ↗</button>}<button disabled={busy||kind(entry.path)==="other"} style={{...buttonStyle,background:"#334155"}} onClick={()=>void openPreview(entry)}>Preview</button><button disabled={busy} style={buttonStyle} onClick={()=>void downloadFile(entry)}>Download</button></>}
 </div>)}
 <div style={{display:"flex",justifyContent:"space-between",gap:12,flexWrap:"wrap",alignItems:"center",marginTop:20}}><div><span>{selected.length} selected</span> <button style={{...buttonStyle,background:"#334155",marginLeft:8}} onClick={()=>setSelected(files.map(x=>x.path))}>Select all</button> <button style={{...buttonStyle,background:"#334155"}} onClick={()=>setSelected([])}>Clear</button></div><button disabled={busy||!selected.length} style={buttonStyle} onClick={()=>void downloadZip(files.filter(x=>selection.has(x.path)),archive.replace(/\.zip$/i,"")+"-selected.zip")}>Download selected ZIP ↓</button></div>
 </section>}
